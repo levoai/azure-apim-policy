@@ -1,0 +1,116 @@
+<policies>
+    <inbound>
+        <set-variable name="requestContentType" value="@{
+            if (context.Request.Body != null)
+            {
+                string[] value;
+                if (context.Request.Headers.TryGetValue("Content-Type", out value))
+                {
+                    if (value != null && value.Length > 0)
+                    {
+                        return value[0];
+                    }
+                }
+            }
+            return "";
+        }" />
+        <set-variable name="requestBody" value="@{
+            if (context.Request.Body != null)
+            {
+                var contentType = context.Variables.GetValueOrDefault<string>("requestContentType", "");
+                if (contentType.Equals("")
+                    || contentType.Contains("json") 
+                    || contentType.Contains("text/plain") 
+                    || contentType.Contains("grpc") 
+                    || contentType.Contains("x-www-form-urlencoded")
+                    || contentType.Contains("xml")
+                )
+                {
+                    return Convert.ToBase64String(context.Request.Body.As<byte[]>(preserveContent: true));
+                }
+            }
+            return "";
+        }" />
+        <base />
+    </inbound>
+    <backend>
+        <base />
+    </backend>
+    <outbound>
+        <send-one-way-request mode="new" timeout="20">
+            <set-url>{{LevoTracesEndpoint}}/1.0/ebpf/traces</set-url>
+            <set-method>POST</set-method>
+            <set-header name="x-levo-organization-id" exists-action="override">
+                <value>{{LevoOrgId}}</value>
+            </set-header>
+            <set-header name="content-type" exists-action="override">
+                <value>application/json</value>
+            </set-header>
+            <set-body>@{
+                var reqHeaders = context.Request.Headers.ToDictionary(kvp => kvp.Key, kvp => String.Join(",", kvp.Value));
+                reqHeaders[":method"] = context.Request.Method;
+                reqHeaders[":path"] = context.Request.OriginalUrl.Path + context.Request.OriginalUrl.QueryString;
+                reqHeaders[":scheme"] = context.Request.OriginalUrl.Scheme;
+                reqHeaders[":authority"] = context.Request.OriginalUrl.Host;
+                reqHeaders["Content-Type"] = context.Variables.GetValueOrDefault<string>("requestContentType", "");
+
+                var resHeaders = context.Response.Headers.ToDictionary(kvp => kvp.Key, kvp => String.Join(",", kvp.Value));
+                resHeaders[":status"] = context.Response.StatusCode.ToString();
+
+                var resBody = "";
+                if (context.Response.Body != null)
+                {
+                    string[] value;
+                    string contentType = "";
+                    if (context.Response.Headers.TryGetValue("Content-Type", out value) && value != null && value.Length > 0)
+                    {
+                        contentType = value[0];
+                    }
+                    if (contentType.Equals("")
+                        || contentType.Contains("json") 
+                        || contentType.Contains("text/plain") 
+                        || contentType.Contains("grpc") 
+                        || contentType.Contains("x-www-form-urlencoded")
+                        || contentType.Contains("xml")
+                    )
+                    {
+                        resBody = Convert.ToBase64String(context.Response.Body.As<byte[]>(preserveContent: true));
+                    }
+                }
+
+                return new JObject(
+                    new JProperty("request",
+                        new JObject(
+                            new JProperty("headers", JObject.FromObject(reqHeaders)),
+                            new JProperty("body", context.Variables.GetValueOrDefault<string>("requestBody", "")),
+                            new JProperty("truncated", false)
+                        )
+                    ),
+                    new JProperty("response",
+                        new JObject(
+                            new JProperty("headers", JObject.FromObject(resHeaders)),
+                            new JProperty("body", resBody),
+                            new JProperty("truncated", false)
+                        )
+                    ),
+                    new JProperty("resource", 
+                        new JObject(
+                            new JProperty("sensor_type", "AZURE_API_MANAGEMENT_POLICY"),
+                            new JProperty("sensor_version", "0.1.0"),
+                            new JProperty("host_name", context.Request.OriginalUrl.Host),
+                            new JProperty("levo_env", "{{LevoEnv}}")
+                        )
+                    ),
+                    new JProperty("span_kind", "SERVER"),
+                    new JProperty("duration_ns", context.Elapsed.TotalMilliseconds*1000000),
+                    new JProperty("request_time_ns", context.Timestamp.Ticks * 100),
+                    new JProperty("trace_id", context.RequestId)
+                ).ToString();
+            }</set-body>
+        </send-one-way-request>
+        <base />
+    </outbound>
+    <on-error>
+        <base />
+    </on-error>
+</policies>
